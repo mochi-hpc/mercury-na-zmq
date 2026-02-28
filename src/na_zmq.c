@@ -253,7 +253,12 @@ na_zmq_gen_identity(char *buf, size_t size)
     uuid_unparse_lower(uuid, uuid_str);
     if (getenv("NA_ZMQ_USE_FULL_UUID") == NULL)
         uuid_str[8] = '\0';
-    snprintf(buf, size, "%s", uuid_str);
+
+    const char *cluster = getenv("NA_ZMQ_CLUSTER_NAME");
+    if (cluster != NULL)
+        snprintf(buf, size, "%s/%s", cluster, uuid_str);
+    else
+        snprintf(buf, size, "%s", uuid_str);
 }
 
 /*---------------------------------------------------------------------------*/
