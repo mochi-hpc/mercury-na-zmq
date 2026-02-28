@@ -75,6 +75,14 @@ na_zmq_addr_decref(struct na_zmq_addr *addr)
     return false;
 }
 
+/* Forward declarations for relay helpers (defined below gen_identity) */
+static const char *na_zmq_get_cluster_prefix(const char *identity,
+    size_t identity_len, size_t *cluster_len);
+static bool na_zmq_is_same_cluster(struct na_zmq_class *priv,
+    const char *identity, size_t identity_len);
+static size_t na_zmq_build_envelope(const char *src_id, size_t src_len,
+    const char *dst_id, size_t dst_len, void *buf, size_t buf_size);
+
 /* Ensure a ZMQ connect() has been called for this addr */
 static na_return_t
 na_zmq_addr_connect(struct na_zmq_class *priv, struct na_zmq_addr *addr)
@@ -86,6 +94,14 @@ na_zmq_addr_connect(struct na_zmq_class *priv, struct na_zmq_addr *addr)
         /* No endpoint — this peer connected to us (inbound connection).
          * ZMQ ROUTER can send to it using its routing ID without connect. */
         addr->connected = true;
+        return NA_SUCCESS;
+    }
+
+    /* Skip direct connect for cross-cluster destinations — these are
+     * unreachable directly and must go through the relay. */
+    if (!na_zmq_is_same_cluster(priv, addr->zmq_identity,
+            addr->zmq_identity_len)) {
+        addr->connected = true; /* Prevent retry */
         return NA_SUCCESS;
     }
 
@@ -122,24 +138,13 @@ na_zmq_complete_op(struct na_zmq_op_id *op, na_return_t ret)
 
 /* Send a multi-frame ZMQ message: [routing_id][header][payload] */
 static na_return_t
-na_zmq_send_msg(struct na_zmq_class *priv, struct na_zmq_addr *dest,
+na_zmq_send_msg_direct(struct na_zmq_class *priv, struct na_zmq_addr *dest,
     const struct na_zmq_msg_hdr *hdr, const void *payload, size_t payload_size)
 {
-    na_return_t ret;
     int retries;
 
-    /* Ensure connected */
-    ret = na_zmq_addr_connect(priv, dest);
-    if (ret != NA_SUCCESS)
-        return ret;
-
-    /*
-     * With ZMQ_ROUTER_MANDATORY, sends to unconnected peers fail with
-     * EHOSTUNREACH. Retry with backoff to allow the TCP connection to
-     * complete after zmq_connect().
-     */
     for (retries = 0; retries < 50; retries++) {
-        /* Frame 1: routing ID (destination identity) */
+        /* Frame 0: routing ID (destination identity) */
         if (zmq_send(priv->zmq_socket, dest->zmq_identity,
                 dest->zmq_identity_len, ZMQ_SNDMORE) < 0) {
             if (errno == EHOSTUNREACH) {
@@ -151,14 +156,14 @@ na_zmq_send_msg(struct na_zmq_class *priv, struct na_zmq_addr *dest,
             return NA_PROTOCOL_ERROR;
         }
 
-        /* Frame 2: header */
+        /* Frame 1: header */
         if (zmq_send(priv->zmq_socket, hdr, sizeof(*hdr),
                 payload_size > 0 ? ZMQ_SNDMORE : 0) < 0) {
             NA_LOG_ERROR("zmq_send header failed: %s", zmq_strerror(errno));
             return NA_PROTOCOL_ERROR;
         }
 
-        /* Frame 3: payload (may be empty) */
+        /* Frame 2: payload (may be empty) */
         if (payload_size > 0) {
             if (zmq_send(priv->zmq_socket, payload, payload_size, 0) < 0) {
                 NA_LOG_ERROR(
@@ -173,6 +178,93 @@ na_zmq_send_msg(struct na_zmq_class *priv, struct na_zmq_addr *dest,
     NA_LOG_ERROR("zmq_send failed after retries: peer %.*s unreachable",
         (int) dest->zmq_identity_len, dest->zmq_identity);
     return NA_PROTOCOL_ERROR;
+}
+
+/* Send via relay: [relay_identity][envelope][header][payload] */
+static na_return_t
+na_zmq_send_msg_via_relay(struct na_zmq_class *priv, struct na_zmq_addr *dest,
+    const struct na_zmq_msg_hdr *hdr, const void *payload, size_t payload_size)
+{
+    uint8_t envelope_buf[5 + NA_ZMQ_MAX_ADDR_LEN * 2];
+    size_t envelope_size;
+    int retries;
+
+    envelope_size = na_zmq_build_envelope(
+        priv->self_identity, strlen(priv->self_identity),
+        dest->zmq_identity, dest->zmq_identity_len,
+        envelope_buf, sizeof(envelope_buf));
+    if (envelope_size == 0) {
+        NA_LOG_ERROR("Failed to build envelope for relay send");
+        return NA_PROTOCOL_ERROR;
+    }
+
+    for (retries = 0; retries < 50; retries++) {
+        /* Frame 0: relay routing ID */
+        if (zmq_send(priv->zmq_socket, priv->relay_addr->zmq_identity,
+                priv->relay_addr->zmq_identity_len, ZMQ_SNDMORE) < 0) {
+            if (errno == EHOSTUNREACH) {
+                usleep(10000);
+                continue;
+            }
+            NA_LOG_ERROR("zmq_send relay routing_id failed: %s",
+                zmq_strerror(errno));
+            return NA_PROTOCOL_ERROR;
+        }
+
+        /* Frame 1: envelope */
+        if (zmq_send(priv->zmq_socket, envelope_buf, envelope_size,
+                ZMQ_SNDMORE) < 0) {
+            NA_LOG_ERROR("zmq_send envelope failed: %s",
+                zmq_strerror(errno));
+            return NA_PROTOCOL_ERROR;
+        }
+
+        /* Frame 2: header */
+        if (zmq_send(priv->zmq_socket, hdr, sizeof(*hdr),
+                payload_size > 0 ? ZMQ_SNDMORE : 0) < 0) {
+            NA_LOG_ERROR("zmq_send header failed: %s", zmq_strerror(errno));
+            return NA_PROTOCOL_ERROR;
+        }
+
+        /* Frame 3: payload (may be empty) */
+        if (payload_size > 0) {
+            if (zmq_send(priv->zmq_socket, payload, payload_size, 0) < 0) {
+                NA_LOG_ERROR("zmq_send payload failed: %s",
+                    zmq_strerror(errno));
+                return NA_PROTOCOL_ERROR;
+            }
+        }
+
+        return NA_SUCCESS;
+    }
+
+    NA_LOG_ERROR("zmq_send via relay failed after retries: peer %.*s",
+        (int) dest->zmq_identity_len, dest->zmq_identity);
+    return NA_PROTOCOL_ERROR;
+}
+
+/* Send a message — routes through relay if cross-cluster */
+static na_return_t
+na_zmq_send_msg(struct na_zmq_class *priv, struct na_zmq_addr *dest,
+    const struct na_zmq_msg_hdr *hdr, const void *payload, size_t payload_size)
+{
+    na_return_t ret;
+
+    /* Ensure connected */
+    ret = na_zmq_addr_connect(priv, dest);
+    if (ret != NA_SUCCESS)
+        return ret;
+
+    /* Cross-cluster: send via relay */
+    if (priv->relay_addr != NULL &&
+        !na_zmq_is_same_cluster(priv, dest->zmq_identity,
+            dest->zmq_identity_len)) {
+        return na_zmq_send_msg_via_relay(priv, dest, hdr, payload,
+            payload_size);
+    }
+
+    /* Same cluster (or no relay): direct send */
+    return na_zmq_send_msg_direct(priv, dest, hdr, payload, payload_size);
 }
 
 /* Find or create an addr for a given identity string */
@@ -259,6 +351,104 @@ na_zmq_gen_identity(char *buf, size_t size)
         snprintf(buf, size, "%s/%s", cluster, uuid_str);
     else
         snprintf(buf, size, "%s", uuid_str);
+}
+
+/*---------------------------------------------------------------------------*/
+/* Cross-cluster relay helpers                                               */
+/*---------------------------------------------------------------------------*/
+
+/* Extract cluster prefix from identity (everything before first '/').
+ * Returns pointer into identity string, sets *cluster_len.
+ * Returns NULL if no '/' found. */
+static const char *
+na_zmq_get_cluster_prefix(const char *identity, size_t identity_len,
+    size_t *cluster_len)
+{
+    size_t i;
+
+    for (i = 0; i < identity_len; i++) {
+        if (identity[i] == '/') {
+            *cluster_len = i;
+            return identity;
+        }
+    }
+
+    *cluster_len = 0;
+    return NULL;
+}
+
+/* Check if an identity belongs to the same cluster as this process.
+ * Returns true if same cluster or if either/both have no cluster prefix. */
+static bool
+na_zmq_is_same_cluster(struct na_zmq_class *priv, const char *identity,
+    size_t identity_len)
+{
+    const char *other_cluster;
+    size_t other_cluster_len;
+
+    if (priv->self_cluster == NULL)
+        return true; /* No cluster configured — treat as same */
+
+    other_cluster = na_zmq_get_cluster_prefix(identity, identity_len,
+        &other_cluster_len);
+    if (other_cluster == NULL)
+        return true; /* Other has no cluster — treat as same */
+
+    if (priv->self_cluster_len != other_cluster_len)
+        return false;
+
+    return memcmp(priv->self_cluster, other_cluster, other_cluster_len) == 0;
+}
+
+/* Build an envelope frame for relay routing.
+ * Format: [0xFF][src_id_len:u16le][dst_id_len:u16le][src_id][dst_id]
+ * Returns total size written, or 0 on error. */
+static size_t
+na_zmq_build_envelope(const char *src_id, size_t src_len,
+    const char *dst_id, size_t dst_len, void *buf, size_t buf_size)
+{
+    uint8_t *p = (uint8_t *) buf;
+    size_t total = 1 + 2 + 2 + src_len + dst_len;
+    uint16_t src16, dst16;
+
+    if (total > buf_size || src_len > UINT16_MAX || dst_len > UINT16_MAX)
+        return 0;
+
+    p[0] = NA_ZMQ_ENVELOPE_MAGIC;
+    src16 = (uint16_t) src_len;
+    dst16 = (uint16_t) dst_len;
+    memcpy(p + 1, &src16, sizeof(src16));
+    memcpy(p + 3, &dst16, sizeof(dst16));
+    memcpy(p + 5, src_id, src_len);
+    memcpy(p + 5 + src_len, dst_id, dst_len);
+
+    return total;
+}
+
+/* Parse an envelope frame. Returns true on success. */
+static bool
+na_zmq_parse_envelope(const void *data, size_t data_len,
+    const char **src_id, size_t *src_len,
+    const char **dst_id, size_t *dst_len)
+{
+    const uint8_t *p = (const uint8_t *) data;
+    uint16_t src16, dst16;
+
+    if (data_len < 5 || p[0] != NA_ZMQ_ENVELOPE_MAGIC)
+        return false;
+
+    memcpy(&src16, p + 1, sizeof(src16));
+    memcpy(&dst16, p + 3, sizeof(dst16));
+
+    if ((size_t)(5 + src16 + dst16) > data_len)
+        return false;
+
+    *src_id = (const char *)(p + 5);
+    *src_len = src16;
+    *dst_id = (const char *)(p + 5 + src16);
+    *dst_len = dst16;
+
+    return true;
 }
 
 /*---------------------------------------------------------------------------*/
@@ -395,17 +585,80 @@ na_zmq_initialize(na_class_t *na_class, const struct na_info *na_info,
         "Could not create self address");
     priv->self_addr->connected = true;
 
+    /* Extract cluster prefix from self_identity */
+    {
+        const char *cluster;
+        size_t cluster_len;
+
+        cluster = na_zmq_get_cluster_prefix(priv->self_identity,
+            strlen(priv->self_identity), &cluster_len);
+        if (cluster != NULL) {
+            priv->self_cluster = strndup(cluster, cluster_len);
+            NA_CHECK_ERROR(priv->self_cluster == NULL, error, ret, NA_NOMEM,
+                "strndup failed");
+            priv->self_cluster_len = cluster_len;
+        }
+    }
+
+    /* Parse NA_ZMQ_RELAY_ADDRESS (format: "tcp://host:port#identity") */
+    {
+        const char *relay_env = getenv("NA_ZMQ_RELAY_ADDRESS");
+
+        if (relay_env != NULL) {
+            char relay_ep[NA_ZMQ_MAX_ADDR_LEN];
+            char relay_id[NA_ZMQ_MAX_ADDR_LEN];
+            const char *input = relay_env;
+            const char *hash;
+
+            if (strncmp(input, "tcp://", 6) == 0)
+                input = input + 6;
+
+            hash = strchr(input, '#');
+            NA_CHECK_ERROR(hash == NULL, error, ret, NA_PROTOCOL_ERROR,
+                "NA_ZMQ_RELAY_ADDRESS '%s' missing identity "
+                "(expected tcp://host:port#identity)", relay_env);
+
+            {
+                size_t ep_len = (size_t)(hash - input);
+                if (ep_len >= sizeof(relay_ep))
+                    ep_len = sizeof(relay_ep) - 1;
+                snprintf(relay_ep, ep_len + 7, "tcp://%s", input);
+                relay_ep[ep_len + 6] = '\0';
+                snprintf(relay_id, sizeof(relay_id), "%s", hash + 1);
+            }
+
+            priv->relay_addr = na_zmq_addr_create(relay_id, relay_ep, false);
+            NA_CHECK_ERROR(priv->relay_addr == NULL, error, ret, NA_NOMEM,
+                "Could not create relay address");
+
+            if (zmq_connect(priv->zmq_socket, relay_ep) != 0) {
+                NA_GOTO_ERROR(error, ret, NA_PROTOCOL_ERROR,
+                    "zmq_connect to relay (%s) failed: %s",
+                    relay_ep, zmq_strerror(errno));
+            }
+            priv->relay_addr->connected = true;
+
+            NA_LOG_DEBUG("Connected to relay: %s (identity: %s)",
+                relay_ep, relay_id);
+        }
+    }
+
     na_class->plugin_class = priv;
     return NA_SUCCESS;
 
 error:
     if (priv) {
+        if (priv->relay_addr)
+            na_zmq_addr_decref(priv->relay_addr);
+        if (priv->self_addr)
+            na_zmq_addr_decref(priv->self_addr);
         if (priv->zmq_socket)
             zmq_close(priv->zmq_socket);
         if (priv->zmq_context)
             zmq_ctx_destroy(priv->zmq_context);
         hg_thread_mutex_destroy(&priv->socket_lock);
         hg_thread_mutex_destroy(&priv->queue_lock);
+        free(priv->self_cluster);
         free(priv->endpoint);
         free(priv->self_identity);
         free(priv);
@@ -459,6 +712,10 @@ na_zmq_finalize(na_class_t *na_class)
         na_zmq_addr_decref(addr);
     }
 
+    /* Free relay addr */
+    if (priv->relay_addr)
+        na_zmq_addr_decref(priv->relay_addr);
+
     /* Free self addr */
     if (priv->self_addr)
         na_zmq_addr_decref(priv->self_addr);
@@ -471,6 +728,7 @@ na_zmq_finalize(na_class_t *na_class)
 
     hg_thread_mutex_destroy(&priv->socket_lock);
     hg_thread_mutex_destroy(&priv->queue_lock);
+    free(priv->self_cluster);
     free(priv->endpoint);
     free(priv->self_identity);
     free(priv);
@@ -1495,15 +1753,33 @@ na_zmq_process_msg(struct na_zmq_class *priv,
     return NA_SUCCESS;
 }
 
+/* Drain remaining frames of a multi-part message */
+static void
+na_zmq_drain_frames(void *zmq_socket)
+{
+    int more;
+    size_t more_size = sizeof(more);
+
+    zmq_getsockopt(zmq_socket, ZMQ_RCVMORE, &more, &more_size);
+    while (more) {
+        zmq_msg_t discard;
+        zmq_msg_init(&discard);
+        zmq_msg_recv(&discard, zmq_socket, 0);
+        zmq_msg_close(&discard);
+        zmq_getsockopt(zmq_socket, ZMQ_RCVMORE, &more, &more_size);
+    }
+}
+
 /* Drain all available ZMQ messages. Caller must hold socket_lock. */
 static void
 na_zmq_progress(struct na_zmq_class *priv)
 {
     for (;;) {
-        zmq_msg_t id_frame, hdr_frame, payload_frame;
+        zmq_msg_t id_frame, frame1;
         int rc;
         int more;
         size_t more_size = sizeof(more);
+        uint8_t first_byte;
 
         zmq_msg_init(&id_frame);
         rc = zmq_msg_recv(&id_frame, priv->zmq_socket, ZMQ_DONTWAIT);
@@ -1519,56 +1795,133 @@ na_zmq_progress(struct na_zmq_class *priv)
             continue; /* Malformed — skip */
         }
 
-        /* Receive header frame */
-        zmq_msg_init(&hdr_frame);
-        rc = zmq_msg_recv(&hdr_frame, priv->zmq_socket, 0);
+        /* Receive frame 1 (could be header or envelope) */
+        zmq_msg_init(&frame1);
+        rc = zmq_msg_recv(&frame1, priv->zmq_socket, 0);
         if (rc < 0) {
             zmq_msg_close(&id_frame);
-            zmq_msg_close(&hdr_frame);
+            zmq_msg_close(&frame1);
             break;
         }
 
-        if ((size_t) zmq_msg_size(&hdr_frame) < sizeof(struct na_zmq_msg_hdr)) {
+        if (zmq_msg_size(&frame1) < 1) {
             zmq_msg_close(&id_frame);
-            zmq_msg_close(&hdr_frame);
-            /* Drain remaining frames */
-            zmq_getsockopt(priv->zmq_socket, ZMQ_RCVMORE, &more, &more_size);
-            if (more) {
-                zmq_msg_t discard;
-                zmq_msg_init(&discard);
-                zmq_msg_recv(&discard, priv->zmq_socket, 0);
-                zmq_msg_close(&discard);
-            }
+            zmq_msg_close(&frame1);
+            na_zmq_drain_frames(priv->zmq_socket);
             continue;
         }
 
-        struct na_zmq_msg_hdr *hdr =
-            (struct na_zmq_msg_hdr *) zmq_msg_data(&hdr_frame);
+        first_byte = ((uint8_t *) zmq_msg_data(&frame1))[0];
 
-        /* Check for payload frame */
-        zmq_getsockopt(priv->zmq_socket, ZMQ_RCVMORE, &more, &more_size);
+        if (first_byte == NA_ZMQ_ENVELOPE_MAGIC) {
+            /* Envelope path: frame1 is envelope, frame2 is header,
+             * frame3 is payload */
+            zmq_msg_t hdr_frame, payload_frame;
+            const char *src_id, *dst_id;
+            size_t src_len, dst_len;
+            struct na_zmq_msg_hdr *hdr;
 
-        zmq_msg_init(&payload_frame);
-        if (more) {
-            rc = zmq_msg_recv(&payload_frame, priv->zmq_socket, 0);
+            if (!na_zmq_parse_envelope(zmq_msg_data(&frame1),
+                    zmq_msg_size(&frame1), &src_id, &src_len,
+                    &dst_id, &dst_len)) {
+                zmq_msg_close(&id_frame);
+                zmq_msg_close(&frame1);
+                na_zmq_drain_frames(priv->zmq_socket);
+                continue;
+            }
+
+            /* Receive header frame */
+            zmq_getsockopt(priv->zmq_socket, ZMQ_RCVMORE, &more, &more_size);
+            if (!more) {
+                zmq_msg_close(&id_frame);
+                zmq_msg_close(&frame1);
+                continue; /* Malformed envelope message */
+            }
+
+            zmq_msg_init(&hdr_frame);
+            rc = zmq_msg_recv(&hdr_frame, priv->zmq_socket, 0);
             if (rc < 0) {
                 zmq_msg_close(&id_frame);
+                zmq_msg_close(&frame1);
                 zmq_msg_close(&hdr_frame);
-                zmq_msg_close(&payload_frame);
                 break;
             }
+
+            if ((size_t) zmq_msg_size(&hdr_frame) <
+                sizeof(struct na_zmq_msg_hdr)) {
+                zmq_msg_close(&id_frame);
+                zmq_msg_close(&frame1);
+                zmq_msg_close(&hdr_frame);
+                na_zmq_drain_frames(priv->zmq_socket);
+                continue;
+            }
+
+            hdr = (struct na_zmq_msg_hdr *) zmq_msg_data(&hdr_frame);
+
+            /* Receive payload frame if present */
+            zmq_getsockopt(priv->zmq_socket, ZMQ_RCVMORE, &more, &more_size);
+            zmq_msg_init(&payload_frame);
+            if (more) {
+                rc = zmq_msg_recv(&payload_frame, priv->zmq_socket, 0);
+                if (rc < 0) {
+                    zmq_msg_close(&id_frame);
+                    zmq_msg_close(&frame1);
+                    zmq_msg_close(&hdr_frame);
+                    zmq_msg_close(&payload_frame);
+                    break;
+                }
+            }
+
+            /* Use source identity from envelope as sender */
+            na_zmq_process_msg(priv,
+                src_id, src_len,
+                hdr,
+                more ? zmq_msg_data(&payload_frame) : NULL,
+                more ? zmq_msg_size(&payload_frame) : 0);
+
+            zmq_msg_close(&id_frame);
+            zmq_msg_close(&frame1);
+            zmq_msg_close(&hdr_frame);
+            zmq_msg_close(&payload_frame);
+        } else {
+            /* Direct path: frame1 is header (type byte 1-5) */
+            zmq_msg_t payload_frame;
+            struct na_zmq_msg_hdr *hdr;
+
+            if ((size_t) zmq_msg_size(&frame1) <
+                sizeof(struct na_zmq_msg_hdr)) {
+                zmq_msg_close(&id_frame);
+                zmq_msg_close(&frame1);
+                na_zmq_drain_frames(priv->zmq_socket);
+                continue;
+            }
+
+            hdr = (struct na_zmq_msg_hdr *) zmq_msg_data(&frame1);
+
+            /* Check for payload frame */
+            zmq_getsockopt(priv->zmq_socket, ZMQ_RCVMORE, &more, &more_size);
+            zmq_msg_init(&payload_frame);
+            if (more) {
+                rc = zmq_msg_recv(&payload_frame, priv->zmq_socket, 0);
+                if (rc < 0) {
+                    zmq_msg_close(&id_frame);
+                    zmq_msg_close(&frame1);
+                    zmq_msg_close(&payload_frame);
+                    break;
+                }
+            }
+
+            /* Process with routing ID as sender */
+            na_zmq_process_msg(priv,
+                zmq_msg_data(&id_frame), zmq_msg_size(&id_frame),
+                hdr,
+                more ? zmq_msg_data(&payload_frame) : NULL,
+                more ? zmq_msg_size(&payload_frame) : 0);
+
+            zmq_msg_close(&id_frame);
+            zmq_msg_close(&frame1);
+            zmq_msg_close(&payload_frame);
         }
-
-        /* Process the message */
-        na_zmq_process_msg(priv,
-            zmq_msg_data(&id_frame), zmq_msg_size(&id_frame),
-            hdr,
-            more ? zmq_msg_data(&payload_frame) : NULL,
-            more ? zmq_msg_size(&payload_frame) : 0);
-
-        zmq_msg_close(&id_frame);
-        zmq_msg_close(&hdr_frame);
-        zmq_msg_close(&payload_frame);
     }
 }
 

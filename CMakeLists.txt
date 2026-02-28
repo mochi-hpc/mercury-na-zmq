@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(na_plugin_zmq C)
+project(na_plugin_zmq C CXX)
 
 # Find Mercury
 find_package(mercury REQUIRED)
@@ -64,6 +64,14 @@ endif()
 install(TARGETS na_plugin_zmq
     LIBRARY DESTINATION ${NA_PLUGIN_INSTALL_DIR}
 )
+
+# Relay service (optional, requires toml11)
+find_package(toml11 QUIET)
+if(toml11_FOUND)
+    add_subdirectory(relay)
+else()
+    message(STATUS "toml11 not found, relay service will not be built")
+endif()
 
 # Tests
 enable_testing()

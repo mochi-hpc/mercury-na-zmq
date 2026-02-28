@@ -8,6 +8,7 @@ without RDMA.
 
 - Mercury (with dynamic plugin support)
 - libzmq >= 4.3
+- toml11 >= 4.0 (optional, for the relay service)
 
 ## Building
 
@@ -43,6 +44,119 @@ zmq+tcp://hostname:port#identity
 cd build
 NA_PLUGIN_PATH=. ./test/run_tests.sh .
 ```
+
+## Cross-cluster relay
+
+When processes live on separate networks (different clusters), they cannot
+reach each other directly. The relay service bridges clusters: a message from
+process A on cluster "alpha" to process B on cluster "beta" travels
+**A -> relay-alpha -> relay-beta -> B**.
+
+### Building the relay
+
+The relay is built automatically when toml11 is found. If toml11 is
+installed in a non-standard location, pass its prefix to CMake:
+
+```bash
+cmake .. -DCMAKE_PREFIX_PATH="<zmq-prefix>;<toml11-prefix>" ...
+```
+
+The resulting binary is `relay/na_zmq_relay`.
+
+### Configuration
+
+All relays share a single TOML configuration file. Each entry in the
+`[peers]` table describes one relay (address to bind and ZMQ routing
+identity):
+
+```toml
+[peers.alpha]
+address = "tcp://login-alpha.example.com:5555"
+identity = "relay-alpha"
+
+[peers.beta]
+address = "tcp://login-beta.example.com:5555"
+identity = "relay-beta"
+
+[peers.gamma]
+address = "tcp://login-gamma.example.com:5555"
+identity = "relay-gamma"
+```
+
+### Starting a relay
+
+Each relay is started with the shared config file and its own cluster name:
+
+```bash
+na_zmq_relay relays.toml alpha   # on login-alpha
+na_zmq_relay relays.toml beta    # on login-beta
+na_zmq_relay relays.toml gamma   # on login-gamma
+```
+
+The relay looks up its own entry in `[peers]` to determine which address to
+bind. It connects to every other entry as a remote peer.
+
+### Configuring Mercury processes
+
+Two environment variables enable relay-based routing in the NA plugin:
+
+- **`NA_ZMQ_CLUSTER_NAME`** -- prefixed to the process identity
+  (e.g. `alpha/a1b2c3d4`). Used to determine whether a destination is local
+  or cross-cluster.
+- **`NA_ZMQ_RELAY_ADDRESS`** -- address of the local relay in
+  `tcp://host:port#identity` format. Cross-cluster messages are forwarded
+  through this relay.
+
+```bash
+# On cluster alpha
+export NA_ZMQ_CLUSTER_NAME=alpha
+export NA_ZMQ_RELAY_ADDRESS="tcp://login-alpha.example.com:5555#relay-alpha"
+my_mercury_app ...
+
+# On cluster beta
+export NA_ZMQ_CLUSTER_NAME=beta
+export NA_ZMQ_RELAY_ADDRESS="tcp://login-beta.example.com:5555#relay-beta"
+my_mercury_app ...
+```
+
+When a process sends a message to a destination whose cluster prefix differs
+from its own, the plugin automatically routes the message through the relay
+instead of attempting a direct connection. Same-cluster messages are sent
+directly as before.
+
+### Wire protocol: envelope frame
+
+Cross-cluster messages use a 4-frame format with an envelope inserted between
+the routing ID and the header:
+
+| Frame | Contents |
+|-------|----------|
+| 0. Routing ID | Next hop (relay identity or final destination) |
+| 1. Envelope | `0xFF` magic + source/destination identity strings |
+| 2. Header | `struct na_zmq_msg_hdr` (unchanged) |
+| 3. Payload | Application data (optional) |
+
+The envelope's first byte (`0xFF`) distinguishes it from a direct header
+(whose type field is 1--5). The relay treats the header and payload as opaque
+data -- it only reads the envelope to determine the next hop.
+
+### Message flow example
+
+Process A (`alpha/a1b2c3d4`) sends a message to process B (`beta/e5f6g7h8`):
+
+```
+1. A sees different cluster prefix ("alpha" != "beta")
+2. A builds envelope {src="alpha/a1b2c3d4", dst="beta/e5f6g7h8"}
+3. A sends to local relay:     [relay-alpha][envelope][hdr][payload]
+4. relay-alpha extracts dst cluster = "beta", forwards to peer:
+                                [relay-beta] [envelope][hdr][payload]
+5. relay-beta extracts dst cluster = "beta" (local), forwards to B:
+                                [beta/e5f6g7h8][envelope][hdr][payload]
+6. B detects envelope (0xFF), reads src = "alpha/a1b2c3d4"
+7. B processes the message normally with source = "alpha/a1b2c3d4"
+```
+
+Response messages (including RMA GET responses) follow the reverse path.
 
 ## Architecture
 
@@ -247,15 +361,20 @@ not found, the operation has already completed and cancellation is a no-op.
 
 ```
 mercury-na-zmq/
-  CMakeLists.txt           Build system (finds Mercury + ZMQ, builds MODULE .so)
+  CMakeLists.txt           Build system (finds Mercury + ZMQ + toml11, builds all targets)
   src/
     na_zmq.h               Data structures, constants, wire protocol definitions
     na_zmq.c               All na_class_ops callbacks + internal helpers
+  relay/
+    CMakeLists.txt          Builds the na_zmq_relay executable
+    relay_config.hpp        TOML config loading (header-only)
+    relay.cpp               Relay service: ZMQ event loop + message forwarding
   test/
-    CMakeLists.txt          Test executables
+    CMakeLists.txt          Test executables and CTest definitions
     test_zmq_init.c         Init/finalize smoke test
     test_zmq_msg_server.c   Message test server (unexpected + expected)
     test_zmq_msg_client.c   Message test client
+    test_relay_driver.sh    Cross-cluster relay integration test driver
     run_tests.sh            Test runner (server/client pairs + integration tests)
     ... (additional HG-level test infrastructure)
 ```

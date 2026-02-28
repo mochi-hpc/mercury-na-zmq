@@ -26,6 +26,7 @@
 
 #define NA_ZMQ_MAX_MSG_SIZE (64 * 1024) /* 64 KB max message */
 #define NA_ZMQ_MAX_ADDR_LEN 256
+#define NA_ZMQ_ENVELOPE_MAGIC 0xFF     /* Envelope frame marker */
 
 /**********************/
 /* Op status flags    */
@@ -147,6 +148,11 @@ struct na_zmq_class {
     hg_thread_mutex_t queue_lock;  /* Protects queues and shared state */
 
     bool listen;
+
+    /* Cross-cluster relay support */
+    char *self_cluster;            /* Cluster prefix from identity (before '/'), or NULL */
+    size_t self_cluster_len;
+    struct na_zmq_addr *relay_addr; /* Local relay address, or NULL */
 };
 
 #endif /* NA_ZMQ_H */

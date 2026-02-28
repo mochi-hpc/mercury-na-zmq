@@ -94,3 +94,31 @@ add_test(NAME zmq_bulk
 # All tests need NA_PLUGIN_PATH to find the plugin
 set_tests_properties(zmq_init zmq_proc zmq_msg zmq_lookup zmq_rpc zmq_bulk
     PROPERTIES ENVIRONMENT "NA_PLUGIN_PATH=$<TARGET_FILE_DIR:na_plugin_zmq>")
+
+# ============================================================
+# Cross-cluster relay integration tests
+# ============================================================
+
+if(TARGET na_zmq_relay)
+    set(RELAY_TEST_DRIVER ${CMAKE_CURRENT_SOURCE_DIR}/test_relay_driver.sh)
+
+    # Relay RPC test (RPC through two relays between clusters)
+    add_test(NAME zmq_relay_rpc
+        COMMAND ${RELAY_TEST_DRIVER}
+            $<TARGET_FILE:na_zmq_relay>
+            $<TARGET_FILE:test_hg_server>
+            $<TARGET_FILE:test_rpc>)
+    set_tests_properties(zmq_relay_rpc
+        PROPERTIES ENVIRONMENT "NA_PLUGIN_PATH=$<TARGET_FILE_DIR:na_plugin_zmq>"
+                   TIMEOUT 60)
+
+    # Relay bulk test (RPC + bulk transfer through two relays between clusters)
+    add_test(NAME zmq_relay_bulk
+        COMMAND ${RELAY_TEST_DRIVER}
+            $<TARGET_FILE:na_zmq_relay>
+            $<TARGET_FILE:test_hg_server>
+            $<TARGET_FILE:test_bulk>)
+    set_tests_properties(zmq_relay_bulk
+        PROPERTIES ENVIRONMENT "NA_PLUGIN_PATH=$<TARGET_FILE_DIR:na_plugin_zmq>"
+                   TIMEOUT 60)
+endif()
