@@ -59,3 +59,38 @@ target_link_libraries(test_bulk PRIVATE hg_test_common_lib)
 # HG Proc test (standalone, no server needed)
 add_executable(test_proc test_proc.c)
 target_link_libraries(test_proc PRIVATE hg_test_common_lib)
+
+# ============================================================
+# CTest definitions
+# ============================================================
+
+set(TEST_DRIVER ${CMAKE_CURRENT_SOURCE_DIR}/test_driver.sh)
+
+# Standalone tests
+add_test(NAME zmq_init COMMAND test_zmq_init)
+add_test(NAME zmq_proc COMMAND test_proc)
+
+# Server+client tests
+add_test(NAME zmq_msg
+    COMMAND ${TEST_DRIVER}
+        $<TARGET_FILE:test_zmq_msg_server> --
+        $<TARGET_FILE:test_zmq_msg_client>)
+
+add_test(NAME zmq_lookup
+    COMMAND ${TEST_DRIVER}
+        $<TARGET_FILE:test_lookup_server> -p zmq --
+        $<TARGET_FILE:test_lookup> -p zmq)
+
+add_test(NAME zmq_rpc
+    COMMAND ${TEST_DRIVER}
+        $<TARGET_FILE:test_hg_server> -p zmq --
+        $<TARGET_FILE:test_rpc> -p zmq)
+
+add_test(NAME zmq_bulk
+    COMMAND ${TEST_DRIVER}
+        $<TARGET_FILE:test_hg_server> -p zmq --
+        $<TARGET_FILE:test_bulk> -p zmq)
+
+# All tests need NA_PLUGIN_PATH to find the plugin
+set_tests_properties(zmq_init zmq_proc zmq_msg zmq_lookup zmq_rpc zmq_bulk
+    PROPERTIES ENVIRONMENT "NA_PLUGIN_PATH=$<TARGET_FILE_DIR:na_plugin_zmq>")

@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <uuid/uuid.h>
 
 /*---------------------------------------------------------------------------*/
 /* Local helpers                                                             */
@@ -241,20 +242,18 @@ na_zmq_resolve_endpoint(const char *raw_endpoint, char *resolved, size_t size)
     snprintf(resolved, size, "%s", raw_endpoint);
 }
 
-static hg_atomic_int32_t na_zmq_id_counter_g = HG_ATOMIC_VAR_INIT(0);
-
-/* Generate a unique identity string */
+/* Generate a unique identity string using a random UUID */
 static void
 na_zmq_gen_identity(char *buf, size_t size)
 {
-    char hostname[128];
-    int counter;
+    uuid_t uuid;
+    char uuid_str[37]; /* 36 chars + NUL */
 
-    if (gethostname(hostname, sizeof(hostname)) != 0)
-        snprintf(hostname, sizeof(hostname), "unknown");
-
-    counter = hg_atomic_incr32(&na_zmq_id_counter_g);
-    snprintf(buf, size, "zmq-%s-%d-%d", hostname, (int) getpid(), counter);
+    uuid_generate(uuid);
+    uuid_unparse_lower(uuid, uuid_str);
+    if (getenv("NA_ZMQ_USE_FULL_UUID") == NULL)
+        uuid_str[8] = '\0';
+    snprintf(buf, size, "%s", uuid_str);
 }
 
 /*---------------------------------------------------------------------------*/
