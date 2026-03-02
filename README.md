@@ -2,21 +2,20 @@
 
 ZeroMQ ROUTER-based NA transport plugin for Mercury. Provides a portable,
 TCP-based NA backend useful for development, testing, and environments
-without RDMA.
+without a high-performance network.
 
 ## Requirements
 
 - Mercury (with dynamic plugin support)
 - libzmq >= 4.3
-- toml11 >= 4.0 (optional, for the relay service)
+- uuid
+- toml11 >= 4.0 (for the relay service)
 
 ## Building
 
 ```bash
 mkdir build && cd build
-cmake .. \
-  -Dmercury_DIR=<mercury-install>/share/cmake/mercury \
-  -DCMAKE_PREFIX_PATH=<zmq-prefix>
+cmake .. -DCMAKE_PREFIX_PATH=<zmq-prefix>
 make
 ```
 
@@ -42,7 +41,7 @@ zmq+tcp://hostname:port#identity
 
 ```bash
 cd build
-NA_PLUGIN_PATH=. ./test/run_tests.sh .
+make test
 ```
 
 ## Cross-cluster relay
@@ -52,20 +51,16 @@ reach each other directly. The relay service bridges clusters: a message from
 process A on cluster "alpha" to process B on cluster "beta" travels
 **A -> relay-alpha -> relay-beta -> B**.
 
+This assumes that relay-alpha and relay-beta can address each other. If tunnels
+are necessary, the user is responsible for setting them up.
+
 ### Building the relay
 
-The relay is built automatically when toml11 is found. If toml11 is
-installed in a non-standard location, pass its prefix to CMake:
-
-```bash
-cmake .. -DCMAKE_PREFIX_PATH="<zmq-prefix>;<toml11-prefix>" ...
-```
-
-The resulting binary is `relay/na_zmq_relay`.
+The relay is built automatically. The resulting binary is `na_zmq_relay`.
 
 ### Configuration
 
-All relays share a single TOML configuration file. Each entry in the
+All relays can share a single TOML configuration file. Each entry in the
 `[peers]` table describes one relay (address to bind and ZMQ routing
 identity):
 
@@ -76,7 +71,7 @@ identity = "relay-alpha"
 
 [peers.beta]
 address = "tcp://login-beta.example.com:5555"
-identity = "relay-beta"
+# if not provided, the identity field is set to the cluster name (here "beta")
 
 [peers.gamma]
 address = "tcp://login-gamma.example.com:5555"
@@ -172,9 +167,10 @@ are emulated with request/response messages.
 
 Each `na_class` owns one ZMQ context and one ROUTER socket. During
 initialization the socket is assigned a unique routing identity of the form
-`zmq-<hostname>-<pid>-<counter>` via `ZMQ_ROUTING_ID`, then bound to a TCP
-endpoint. Ephemeral ports are supported: binding to `tcp://*:*` lets ZMQ
-choose a port, which is queried back with `ZMQ_LAST_ENDPOINT`.
+of a UUID (shortened by default to 8 characters) or "cluster/uuid", via
+`ZMQ_ROUTING_ID`, then bound to a TCP endpoint. Ephemeral ports are supported:
+binding to `tcp://*:*` lets ZMQ choose a port, which is queried back with
+`ZMQ_LAST_ENDPOINT`.
 
 Both listeners and clients bind their socket (every endpoint is a server).
 Outbound connectivity is established with `zmq_connect()` on first use (lazy
@@ -192,7 +188,7 @@ zmq+tcp://host:port#zmq-identity-string
 
 - **Endpoint** (`tcp://host:port`): used by `zmq_connect()` to establish the
   TCP connection.
-- **Identity** (`zmq-hostname-pid-counter`): used as the ZMQ routing ID in
+- **Identity** (`cluster/uuid` or just `uuid`): used as the ZMQ routing ID in
   the first frame of every outgoing message.
 
 For inbound connections (a peer that connected to us), no endpoint is known;
@@ -204,7 +200,7 @@ process to reconstruct the address and connect.
 
 ### Wire protocol
 
-Every message consists of three ZMQ frames:
+Messages targetting a destination in the same cluster consist of three ZMQ frames:
 
 | Frame | Contents |
 |-------|----------|
@@ -356,25 +352,3 @@ A pending operation can be cancelled by searching the three operation queues
 (`unexpected_op_queue`, `expected_op_queue`, `pending_rma_queue`). If found,
 the operation is removed from its queue and completed with `NA_CANCELED`. If
 not found, the operation has already completed and cancellation is a no-op.
-
-### Files
-
-```
-mercury-na-zmq/
-  CMakeLists.txt           Build system (finds Mercury + ZMQ + toml11, builds all targets)
-  src/
-    na_zmq.h               Data structures, constants, wire protocol definitions
-    na_zmq.c               All na_class_ops callbacks + internal helpers
-  relay/
-    CMakeLists.txt          Builds the na_zmq_relay executable
-    relay_config.hpp        TOML config loading (header-only)
-    relay.cpp               Relay service: ZMQ event loop + message forwarding
-  test/
-    CMakeLists.txt          Test executables and CTest definitions
-    test_zmq_init.c         Init/finalize smoke test
-    test_zmq_msg_server.c   Message test server (unexpected + expected)
-    test_zmq_msg_client.c   Message test client
-    test_relay_driver.sh    Cross-cluster relay integration test driver
-    run_tests.sh            Test runner (server/client pairs + integration tests)
-    ... (additional HG-level test infrastructure)
-```

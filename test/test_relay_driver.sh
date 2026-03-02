@@ -38,11 +38,11 @@ RELAY_B_PORT=15551
 cat > "$TMPDIR/relays.toml" <<EOF
 [peers.cluster-a]
 address = "tcp://127.0.0.1:${RELAY_A_PORT}"
-identity = "relay-a"
+# identity defaults to "cluster-a"
 
 [peers.cluster-b]
 address = "tcp://127.0.0.1:${RELAY_B_PORT}"
-identity = "relay-b"
+# identity defaults to "cluster-b"
 EOF
 
 # ── Start relays ─────────────────────────────────────────────────────────
@@ -74,7 +74,7 @@ rm -f /tmp/port.cfg
 
 echo "# Starting server in cluster-a"
 NA_ZMQ_CLUSTER_NAME=cluster-a \
-NA_ZMQ_RELAY_ADDRESS="tcp://127.0.0.1:${RELAY_A_PORT}#relay-a" \
+NA_ZMQ_RELAY_ADDRESS="tcp://127.0.0.1:${RELAY_A_PORT}#cluster-a" \
 "$SERVER_BIN" -p zmq &
 SERVER_PID=$!
 
@@ -103,7 +103,7 @@ echo "# Server address: $(cat /tmp/port.cfg)"
 echo "# Starting client in cluster-b"
 CLIENT_RC=0
 NA_ZMQ_CLUSTER_NAME=cluster-b \
-NA_ZMQ_RELAY_ADDRESS="tcp://127.0.0.1:${RELAY_B_PORT}#relay-b" \
+NA_ZMQ_RELAY_ADDRESS="tcp://127.0.0.1:${RELAY_B_PORT}#cluster-b" \
 "$CLIENT_BIN" -p zmq "${CLIENT_EXTRA_ARGS[@]}" || CLIENT_RC=$?
 
 # ── Wait for server ──────────────────────────────────────────────────────

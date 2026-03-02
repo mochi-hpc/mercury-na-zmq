@@ -9,7 +9,7 @@
  *
  *   [peers.beta]
  *   address = "tcp://login-beta:5555"
- *   identity = "relay-beta"
+ *   # identity defaults to "beta" (the cluster name) if omitted
  *
  * Each relay is started with:  na_zmq_relay <config.toml> <cluster>
  * It binds using its own entry and connects to every other peer.
@@ -52,14 +52,14 @@ load_config(const std::string &path, const std::string &cluster)
 
     cfg.cluster = cluster;
     cfg.bind_address = toml::find<std::string>(self_it->second, "address");
-    cfg.identity = toml::find<std::string>(self_it->second, "identity");
+    cfg.identity = toml::find_or<std::string>(self_it->second, "identity", cluster);
 
     for (const auto &[name, val] : table) {
         if (name == cluster)
             continue; /* Skip self */
         PeerInfo pi;
         pi.address = toml::find<std::string>(val, "address");
-        pi.identity = toml::find<std::string>(val, "identity");
+        pi.identity = toml::find_or<std::string>(val, "identity", name);
         cfg.peers[name] = std::move(pi);
     }
 
