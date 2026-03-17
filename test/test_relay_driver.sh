@@ -28,7 +28,23 @@ shift 3
 CLIENT_EXTRA_ARGS=("$@")
 
 TMPDIR=$(mktemp -d /tmp/zmq_relay_test.XXXXXX)
-trap 'kill $RELAY_A_PID $RELAY_B_PID $SERVER_PID 2>/dev/null; rm -rf "$TMPDIR"' EXIT
+
+cleanup() {
+    # Print relay logs before removing temp dir (invaluable on timeout)
+    if [ -f "$TMPDIR/relay-a.log" ]; then
+        echo "# relay-a log:"
+        cat "$TMPDIR/relay-a.log"
+    fi
+    if [ -f "$TMPDIR/relay-b.log" ]; then
+        echo "# relay-b log:"
+        cat "$TMPDIR/relay-b.log"
+    fi
+    # Kill children and wait so ports are released before the next test
+    kill $RELAY_A_PID $RELAY_B_PID $SERVER_PID 2>/dev/null
+    wait $RELAY_A_PID $RELAY_B_PID $SERVER_PID 2>/dev/null
+    rm -rf "$TMPDIR"
+}
+trap cleanup EXIT
 
 RELAY_A_PORT=15550
 RELAY_B_PORT=15551
