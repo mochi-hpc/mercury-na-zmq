@@ -5,6 +5,8 @@
 #
 set -e
 
+TIMEOUT=30
+
 # Split arguments at "--"
 SERVER_ARGS=()
 CLIENT_ARGS=()
@@ -40,13 +42,19 @@ if ! kill -0 $SERVER_PID 2>/dev/null; then
     exit 1
 fi
 
-# Run client
+# Run client with timeout
 CLIENT_RC=0
-"${CLIENT_ARGS[@]}" || CLIENT_RC=$?
+timeout "$TIMEOUT" "${CLIENT_ARGS[@]}" || CLIENT_RC=$?
 
-# Wait for server to finish
+if [ $CLIENT_RC -eq 124 ]; then
+    echo "FAILED: client timed out after ${TIMEOUT}s"
+fi
+
+# Wait for server to finish (give it a moment, then force-kill)
+timeout 5 bash -c "wait $SERVER_PID" 2>/dev/null || true
+kill $SERVER_PID 2>/dev/null || true
 SERVER_RC=0
-wait $SERVER_PID || SERVER_RC=$?
+wait $SERVER_PID 2>/dev/null || SERVER_RC=$?
 
 if [ $SERVER_RC -ne 0 ] || [ $CLIENT_RC -ne 0 ]; then
     echo "FAILED (server=$SERVER_RC client=$CLIENT_RC)"

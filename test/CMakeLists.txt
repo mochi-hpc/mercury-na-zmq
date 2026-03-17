@@ -109,8 +109,7 @@ if(TARGET na_zmq_relay)
             $<TARGET_FILE:test_hg_server>
             $<TARGET_FILE:test_rpc>)
     set_tests_properties(zmq_relay_rpc
-        PROPERTIES ENVIRONMENT "NA_PLUGIN_PATH=$<TARGET_FILE_DIR:na_plugin_zmq>"
-                   TIMEOUT 60)
+        PROPERTIES ENVIRONMENT "NA_PLUGIN_PATH=$<TARGET_FILE_DIR:na_plugin_zmq>")
 
     # Relay bulk test (RPC + bulk transfer through two relays between clusters)
     add_test(NAME zmq_relay_bulk
@@ -119,6 +118,5 @@ if(TARGET na_zmq_relay)
             $<TARGET_FILE:test_hg_server>
             $<TARGET_FILE:test_bulk>)
     set_tests_properties(zmq_relay_bulk
-        PROPERTIES ENVIRONMENT "NA_PLUGIN_PATH=$<TARGET_FILE_DIR:na_plugin_zmq>"
-                   TIMEOUT 60)
+        PROPERTIES ENVIRONMENT "NA_PLUGIN_PATH=$<TARGET_FILE_DIR:na_plugin_zmq>")
 endif()

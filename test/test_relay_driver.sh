@@ -16,6 +16,8 @@
 #
 set -e
 
+TIMEOUT=30
+
 if [ $# -lt 3 ]; then
     echo "Usage: $0 <relay_bin> <server_bin> <client_bin> [client_args...]"
     exit 1
@@ -28,10 +30,9 @@ shift 3
 CLIENT_EXTRA_ARGS=("$@")
 
 TMPDIR=$(mktemp -d /tmp/zmq_relay_test.XXXXXX)
-CLIENT_PID=""
 
 cleanup() {
-    # Print relay logs before removing temp dir (invaluable on timeout)
+    # Print relay logs before removing temp dir
     if [ -f "$TMPDIR/relay-a.log" ]; then
         echo "# relay-a log:"
         cat "$TMPDIR/relay-a.log"
@@ -41,15 +42,10 @@ cleanup() {
         cat "$TMPDIR/relay-b.log"
     fi
     # Kill children and wait so ports are released before the next test
-    kill $RELAY_A_PID $RELAY_B_PID $SERVER_PID $CLIENT_PID 2>/dev/null
-    wait $RELAY_A_PID $RELAY_B_PID $SERVER_PID $CLIENT_PID 2>/dev/null
+    kill $RELAY_A_PID $RELAY_B_PID $SERVER_PID 2>/dev/null
+    wait $RELAY_A_PID $RELAY_B_PID $SERVER_PID 2>/dev/null
     rm -rf "$TMPDIR"
 }
-# Trap SIGTERM/SIGINT explicitly: bash defers signal handling while a
-# foreground command is running, but the `wait` builtin is interruptible.
-# Without this, ctest's timeout SIGTERM would be deferred until the
-# (hanging) client exits, and the cleanup would never run.
-trap 'trap - EXIT; cleanup; exit 1' SIGTERM SIGINT
 trap cleanup EXIT
 
 RELAY_A_PORT=15550
@@ -121,23 +117,25 @@ fi
 echo "# Server address: $(cat /tmp/port.cfg)"
 
 # ── Run client in cluster-b ──────────────────────────────────────────────
-# The client is run in the background so that `wait` (which is
-# interruptible by signals) is used instead of a foreground exec.
-# This lets the SIGTERM trap fire immediately on ctest timeout.
 
 echo "# Starting client in cluster-b"
-NA_ZMQ_CLUSTER_NAME=cluster-b \
-NA_ZMQ_RELAY_ADDRESS="tcp://127.0.0.1:${RELAY_B_PORT}#cluster-b" \
-"$CLIENT_BIN" -p zmq "${CLIENT_EXTRA_ARGS[@]}" &
-CLIENT_PID=$!
-
 CLIENT_RC=0
-wait "$CLIENT_PID" || CLIENT_RC=$?
+timeout "$TIMEOUT" \
+    env NA_ZMQ_CLUSTER_NAME=cluster-b \
+        NA_ZMQ_RELAY_ADDRESS="tcp://127.0.0.1:${RELAY_B_PORT}#cluster-b" \
+    "$CLIENT_BIN" -p zmq "${CLIENT_EXTRA_ARGS[@]}" || CLIENT_RC=$?
+
+if [ $CLIENT_RC -eq 124 ]; then
+    echo "FAILED: client timed out after ${TIMEOUT}s"
+fi
 
 # ── Wait for server ──────────────────────────────────────────────────────
 
+# Give server a moment to finish after client exits, then force-kill
+timeout 5 bash -c "wait $SERVER_PID" 2>/dev/null || true
+kill $SERVER_PID 2>/dev/null || true
 SERVER_RC=0
-wait "$SERVER_PID" || SERVER_RC=$?
+wait "$SERVER_PID" 2>/dev/null || SERVER_RC=$?
 
 # ── Result ───────────────────────────────────────────────────────────────
 
