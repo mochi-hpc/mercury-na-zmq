@@ -1,0 +1,14 @@
+spack:
+  specs:
+  - cmake
+  - mercury~boostsys
+  - libzmq
+  - toml11
+  - util-linux-uuid
+  concretizer:
+    unify: true
+    reuse: true
+  modules:
+    prefix_inspections:
+      lib: [LD_LIBRARY_PATH]
+      lib64: [LD_LIBRARY_PATH]

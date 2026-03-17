@@ -3,6 +3,44 @@ project (na_plugin_zmq C CXX)
 
 # Find Mercury
 find_package (mercury REQUIRED)
+message (STATUS "Mercury version: ${MERCURY_VERSION_FULL}")
+
+# Mercury <= 2.4.1 does not install na_plugin.h / na_error.h which are
+# required to build out-of-tree NA plugins.  Fetch them from the upstream
+# repository when they are missing.
+if (MERCURY_VERSION_FULL VERSION_LESS_EQUAL "2.4.1")
+    set (_hg_tag "v${MERCURY_VERSION_FULL}")
+    set (_hg_hdr_dir "${CMAKE_CURRENT_BINARY_DIR}/mercury_headers")
+    set (_need_download FALSE)
+    foreach (_hdr na_plugin.h na_error.h)
+        if (NOT EXISTS "${_hg_hdr_dir}/${_hdr}")
+            set (_need_download TRUE)
+        endif ()
+    endforeach ()
+    if (_need_download)
+        message (STATUS
+            "Mercury ${MERCURY_VERSION_FULL} does not ship na_plugin.h / "
+            "na_error.h – downloading from GitHub (tag ${_hg_tag})")
+        file (MAKE_DIRECTORY "${_hg_hdr_dir}")
+        foreach (_hdr na_plugin.h na_error.h)
+            file (DOWNLOAD
+                "https://raw.githubusercontent.com/mercury-hpc/mercury/${_hg_tag}/src/na/${_hdr}"
+                "${_hg_hdr_dir}/${_hdr}"
+                STATUS _dl_status
+            )
+            list (GET _dl_status 0 _dl_rc)
+            if (NOT _dl_rc EQUAL 0)
+                list (GET _dl_status 1 _dl_msg)
+                message (FATAL_ERROR
+                    "Failed to download ${_hdr}: ${_dl_msg}")
+            endif ()
+        endforeach ()
+    endif ()
+    set (MERCURY_EXTRA_INCLUDE_DIR "${_hg_hdr_dir}")
+    message (STATUS "Using downloaded NA headers in ${_hg_hdr_dir}")
+else ()
+    set (MERCURY_EXTRA_INCLUDE_DIR "")
+endif ()
 
 # Find ZMQ - try pkg-config first, then manual search
 find_package (PkgConfig QUIET)
@@ -49,6 +87,7 @@ target_include_directories (na_plugin_zmq PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${ZMQ_INCLUDE_DIRS}
     ${UUID_INCLUDE_DIRS}
+    ${MERCURY_EXTRA_INCLUDE_DIR}
 )
 
 target_link_libraries (na_plugin_zmq PRIVATE mercury ${ZMQ_LINK_LIBRARIES} ${UUID_LINK_LIBRARIES})
