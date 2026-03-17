@@ -1,7 +1,10 @@
+# This file defines the spack environment used by github actions
+# (tests, codecov) when building and testing the code.
 spack:
   specs:
   - cmake
-  - mercury~boostsys~ofi
+  - pkg-config
+  - mercury~boostsys~ofi+plugins
   - libzmq
   - toml11
   - util-linux-uuid
@@ -12,3 +15,6 @@ spack:
     prefix_inspections:
       lib: [LD_LIBRARY_PATH]
       lib64: [LD_LIBRARY_PATH]
+  config:
+    install_tree:
+      padded_length: 128

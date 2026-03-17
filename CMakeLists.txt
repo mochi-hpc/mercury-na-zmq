@@ -1,6 +1,25 @@
 cmake_minimum_required (VERSION 3.15)
 project (na_plugin_zmq C CXX)
 
+option (ENABLE_COVERAGE "Enable code coverage" OFF)
+option (ENABLE_ASAN "Enable address sanitizer" OFF)
+
+if (ENABLE_COVERAGE)
+    set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --coverage -O0")
+    set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage -O0")
+    set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage -lgcov")
+    set (CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} --coverage -lgcov")
+    set (CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} --coverage -lgcov")
+endif ()
+
+if (ENABLE_ASAN)
+    set (CMAKE_C_FLAGS "-fno-omit-frame-pointer -g -Wall -fsanitize=address")
+    set (CMAKE_CXX_FLAGS "-fno-omit-frame-pointer -g -Wall -fsanitize=address")
+    set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address")
+    set (CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address")
+    set (CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -fsanitize=address")
+endif ()
+
 # Find Mercury
 find_package (mercury REQUIRED)
 message (STATUS "Mercury version: ${MERCURY_VERSION_FULL}")

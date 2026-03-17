@@ -1,10 +1,11 @@
 spack:
   specs:
   - cmake
-  - mercury~boostsys
+  - mercury~boostsys+plugins
   - libzmq
   - toml11
   - util-linux-uuid
+  - pkg-config
   concretizer:
     unify: true
     reuse: true

@@ -1,0 +1,61 @@
+name: Unit tests
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+    - main
+  pull_request:
+    branches:
+    - main
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup spack
+      uses: spack/setup-spack@v3
+      with:
+        spack_ref: develop
+
+    - name: Add mochi-spack-packages
+      run: |
+        git clone https://github.com/mochi-hpc/mochi-spack-packages
+        spack -e test repo add mochi-spack-packages
+
+    - name: Install spack environment
+      run: |
+        spack -e test install
+
+    - name: Show spack-installed packages for debugging
+      run: |
+        spack -e test find -dlv
+
+    - name: Build code and run unit tests
+      run: |
+        eval `spack env activate --sh test`
+        mkdir build
+        cd build
+        cmake ..
+        make
+        make test
+        make clean
+        cd ..
+        rm -rf build
+
+    - name: Rebuild code and run unit tests with ASAN
+      run: |
+        eval `spack env activate --sh test`
+        mkdir build
+        cd build
+        cmake .. -DENABLE_ASAN=ON
+        make
+        ASAN_OPTIONS="abort_on_error=1" make test
+
+    - name: Show test output
+      if: always()
+      run: |
+        cat build/Testing/Temporary/LastTest.log
