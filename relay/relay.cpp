@@ -243,14 +243,25 @@ main(int argc, char *argv[])
 
         std::string dst_cluster = get_cluster(dst_id);
 
+        std::fprintf(stderr,
+            "relay: msg #%lu src=%s dst=%s dst_cluster=%s frames=%zu\n",
+            msg_count + 1, src_id.c_str(), dst_id.c_str(),
+            dst_cluster.c_str(), frames.size());
+
+        bool ok;
         if (dst_cluster == cfg.cluster || dst_cluster.empty()) {
             /* Local cluster — forward directly to destination process */
-            forward_message(socket, dst_id, frames, 1);
+            ok = forward_message(socket, dst_id, frames, 1);
+            std::fprintf(stderr, "relay: -> local %s: %s\n",
+                dst_id.c_str(), ok ? "ok" : "FAILED");
         } else {
             /* Remote cluster — forward to peer relay */
             auto it = cfg.peers.find(dst_cluster);
             if (it != cfg.peers.end()) {
-                forward_message(socket, it->second.identity, frames, 1);
+                ok = forward_message(socket, it->second.identity, frames, 1);
+                std::fprintf(stderr, "relay: -> peer %s (%s): %s\n",
+                    dst_cluster.c_str(), it->second.identity.c_str(),
+                    ok ? "ok" : "FAILED");
             } else {
                 std::fprintf(stderr,
                     "relay: no peer for cluster '%s', dropping message "

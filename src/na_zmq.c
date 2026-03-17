@@ -1078,15 +1078,22 @@ na_zmq_msg_send_unexpected(na_class_t *na_class, na_context_t *context,
     hdr.tag = tag;
     hdr.payload_size = (uint32_t) buf_size;
 
+    fprintf(stderr, "na_zmq: send_unexpected tag=%u size=%zu dest=%.*s\n",
+        tag, buf_size, (int) dest->zmq_identity_len, dest->zmq_identity);
+
     /* Send (socket_lock protects ZMQ socket) */
     hg_thread_mutex_lock(&priv->socket_lock);
     ret = na_zmq_send_msg(priv, dest, &hdr, buf, buf_size);
     hg_thread_mutex_unlock(&priv->socket_lock);
 
     if (ret != NA_SUCCESS) {
+        fprintf(stderr, "na_zmq: send_unexpected FAILED tag=%u dest=%.*s\n",
+            tag, (int) dest->zmq_identity_len, dest->zmq_identity);
         na_zmq_complete_op(op, ret);
         return NA_SUCCESS; /* Op was submitted, error reported via callback */
     }
+
+    fprintf(stderr, "na_zmq: send_unexpected OK tag=%u\n", tag);
 
     /* Send completes immediately */
     na_zmq_complete_op(op, NA_SUCCESS);
@@ -1176,14 +1183,21 @@ na_zmq_msg_send_expected(na_class_t *na_class, na_context_t *context,
     hdr.tag = tag;
     hdr.payload_size = (uint32_t) buf_size;
 
+    fprintf(stderr, "na_zmq: send_expected tag=%u size=%zu dest=%.*s\n",
+        tag, buf_size, (int) dest->zmq_identity_len, dest->zmq_identity);
+
     hg_thread_mutex_lock(&priv->socket_lock);
     ret = na_zmq_send_msg(priv, dest, &hdr, buf, buf_size);
     hg_thread_mutex_unlock(&priv->socket_lock);
 
     if (ret != NA_SUCCESS) {
+        fprintf(stderr, "na_zmq: send_expected FAILED tag=%u dest=%.*s\n",
+            tag, (int) dest->zmq_identity_len, dest->zmq_identity);
         na_zmq_complete_op(op, ret);
         return NA_SUCCESS;
     }
+
+    fprintf(stderr, "na_zmq: send_expected OK tag=%u\n", tag);
 
     na_zmq_complete_op(op, NA_SUCCESS);
     return NA_SUCCESS;
@@ -1519,6 +1533,10 @@ na_zmq_process_msg(struct na_zmq_class *priv,
 {
     struct na_zmq_addr *source_addr;
     struct na_zmq_op_id *op;
+
+    fprintf(stderr, "na_zmq: process_msg type=%u tag=%u payload=%zu from=%.*s\n",
+        hdr->type, hdr->tag, (size_t) payload_size,
+        (int) sender_id_len, (const char *) sender_id);
 
     hg_thread_mutex_lock(&priv->queue_lock);
     source_addr = na_zmq_find_or_create_addr(priv, sender_id, sender_id_len,
