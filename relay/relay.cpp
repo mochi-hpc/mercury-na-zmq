@@ -179,8 +179,25 @@ main(int argc, char *argv[])
         return 1;
     }
 
-    /* Connect to peer relays */
+    /* Connect to peer relays.
+     *
+     * With ROUTER-to-ROUTER, each relay both binds and would normally
+     * connect to every peer.  But if both sides connect, the same routing
+     * identity appears twice on a socket (once from the inbound accept,
+     * once from the outbound connect), and ZMQ silently drops messages.
+     *
+     * Fix: only connect to peers whose cluster name is lexicographically
+     * greater than ours.  The peer with the smaller name accepts the
+     * inbound connection instead.  This guarantees exactly one TCP link
+     * between each relay pair.
+     */
     for (const auto &[name, peer] : cfg.peers) {
+        if (name <= cfg.cluster) {
+            std::fprintf(stderr,
+                "relay: skipping connect to peer %s (will accept inbound)\n",
+                name.c_str());
+            continue;
+        }
         if (zmq_connect(socket, peer.address.c_str()) != 0) {
             std::fprintf(stderr, "zmq_connect(%s) for peer %s failed: %s\n",
                 peer.address.c_str(), name.c_str(), zmq_strerror(errno));
@@ -243,25 +260,14 @@ main(int argc, char *argv[])
 
         std::string dst_cluster = get_cluster(dst_id);
 
-        std::fprintf(stderr,
-            "relay: msg #%lu src=%s dst=%s dst_cluster=%s frames=%zu\n",
-            msg_count + 1, src_id.c_str(), dst_id.c_str(),
-            dst_cluster.c_str(), frames.size());
-
-        bool ok;
         if (dst_cluster == cfg.cluster || dst_cluster.empty()) {
             /* Local cluster — forward directly to destination process */
-            ok = forward_message(socket, dst_id, frames, 1);
-            std::fprintf(stderr, "relay: -> local %s: %s\n",
-                dst_id.c_str(), ok ? "ok" : "FAILED");
+            forward_message(socket, dst_id, frames, 1);
         } else {
             /* Remote cluster — forward to peer relay */
             auto it = cfg.peers.find(dst_cluster);
             if (it != cfg.peers.end()) {
-                ok = forward_message(socket, it->second.identity, frames, 1);
-                std::fprintf(stderr, "relay: -> peer %s (%s): %s\n",
-                    dst_cluster.c_str(), it->second.identity.c_str(),
-                    ok ? "ok" : "FAILED");
+                forward_message(socket, it->second.identity, frames, 1);
             } else {
                 std::fprintf(stderr,
                     "relay: no peer for cluster '%s', dropping message "
