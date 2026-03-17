@@ -56,7 +56,7 @@ echo "# Starting relay-b on port $RELAY_B_PORT"
 RELAY_B_PID=$!
 
 # Give relays time to bind and connect to each other
-sleep 1
+sleep 2
 
 for pid_name in "relay-a:$RELAY_A_PID" "relay-b:$RELAY_B_PID"; do
     name="${pid_name%%:*}"

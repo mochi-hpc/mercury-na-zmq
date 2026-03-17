@@ -56,6 +56,6 @@ jobs:
         ASAN_OPTIONS="abort_on_error=1" make test
 
     - name: Show test output
-      if: always()
+      if: failure()
       run: |
         cat build/Testing/Temporary/LastTest.log
